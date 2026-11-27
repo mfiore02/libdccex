@@ -1,0 +1,11 @@
+# Build output
+build/
+cmake-build-*/
+
+# Generated docs
+docs/*.pdf
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
