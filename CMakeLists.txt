@@ -8,13 +8,15 @@ project(libdccex
 # ---------------------------------------------------------------------------
 # Library
 # ---------------------------------------------------------------------------
-# Header-only for now. Becomes a compiled library when the first .cpp lands.
-add_library(dccex INTERFACE)
+set(DCCEX_SOURCES
+  src/decoder.cpp)
+
+add_library(dccex STATIC ${DCCEX_SOURCES})
 add_library(dccex::dccex ALIAS dccex)
-target_include_directories(dccex INTERFACE
+target_include_directories(dccex PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_compile_features(dccex INTERFACE cxx_std_17)
+target_compile_features(dccex PUBLIC cxx_std_17)
 
 # ---------------------------------------------------------------------------
 # Development: tests and design-rule checks (top-level builds only)
@@ -32,6 +34,7 @@ if(DCCEX_BUILD_TESTS)
       list(APPEND DCCEX_WARNINGS -Werror)
     endif()
   endif()
+  target_compile_options(dccex PRIVATE ${DCCEX_WARNINGS})
 
   # --- Unit tests (host, full standard library allowed) ---------------------
   include(FetchContent)
@@ -44,6 +47,7 @@ if(DCCEX_BUILD_TESTS)
 
   add_executable(dccex_tests
     tests/main.cpp
+    tests/decoder_test.cpp
     tests/framer_test.cpp
     tests/string_view_test.cpp
     tests/tokenizer_test.cpp)
@@ -61,8 +65,13 @@ if(DCCEX_BUILD_TESTS)
 
   # --- Design rules: freestanding, no exceptions, no RTTI, no allocation ----
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_library(dccex_freestanding_check OBJECT checks/freestanding_check.cpp)
-    target_link_libraries(dccex_freestanding_check PRIVATE dccex::dccex)
+    # Library sources recompiled with freestanding flags, plus a TU that
+    # instantiates every header template.
+    add_library(dccex_freestanding_check OBJECT
+      checks/freestanding_check.cpp ${DCCEX_SOURCES})
+    target_include_directories(dccex_freestanding_check PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(dccex_freestanding_check PRIVATE cxx_std_17)
     target_compile_options(dccex_freestanding_check PRIVATE
       ${DCCEX_WARNINGS} -ffreestanding -fno-exceptions -fno-rtti)
 

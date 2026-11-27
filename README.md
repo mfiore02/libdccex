@@ -12,8 +12,14 @@ and the EX-CommandStation source, and aims to be compatible with DCC-EX.
 
 ## Status
 
-Early development. Implemented so far: the framer, which splits a byte stream into messages,
-and the tokenizer, which splits a message into an opcode and fields.
+Early development. Implemented so far:
+
+- **Framer:** splits a byte stream into messages.
+- **Tokenizer:** splits a message into an opcode and fields.
+- **Decoder:** turns a message into a typed event (loco state, power, CV and address
+  results, version, diagnostics), one event per message.
+
+Not yet: the encoder, for building commands.
 The design is in [`docs/spec.typ`](docs/spec.typ); build the PDF with
 [Typst](https://typst.app): `typst compile docs/spec.typ`.
 

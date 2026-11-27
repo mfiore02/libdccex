@@ -89,7 +89,7 @@ The library is a set of layers. Each layer is usable on its own, and each depend
   [Layer], [Responsibility], [State],
   [Framer], [Accepts arbitrary byte chunks. Emits complete messages delimited by `<` and `>`. Discards bytes outside a message. Enforces a maximum message length and recovers from overflow.], [Fixed buffer],
   [Tokenizer], [Splits one message into an opcode and fields, including quoted strings. Parses fields as integers on request. Structure inside a field, such as `|`-joined callback tags, is left to the decoder.], [None],
-  [Decoder], [Turns tokenized messages into typed events and calls the handler. Unknown or unsupported messages go to a catch-all handler, never an error.], [None],
+  [Decoder], [Turns one message into one typed event. Unknown, unsupported, or malformed messages become an `Unhandled` event, never an error.], [None],
   [Encoder], [Writes commands into a caller-provided buffer. Validates arguments against protocol ranges before writing.], [None],
 )
 
@@ -97,7 +97,7 @@ The library is a set of layers. Each layer is usable on its own, and each depend
 Data flow on a client:
 
 ```
-socket/serial bytes ──▶ Framer ──▶ Tokenizer ──▶ Decoder ──▶ handler callbacks
+socket/serial bytes ──▶ Framer ──▶ Decoder (uses Tokenizer) ──▶ Event ──▶ app's handler
 app calls ──▶ Encoder ──▶ caller buffer ──▶ app writes to socket/serial
 ```
 
@@ -170,7 +170,7 @@ From the throttle developer guide and the command station source:
   [Version], [`<iDCC-EX V-x.y.z / board / shield G-sha>`], [First line of the `<s>` reply. The library extracts the version number and keeps the rest as text.], status("v0.1"),
   [CV read result], [`<v cv value>`], [Reply to `<R cv>` and `<V cv value>`. Value `-1` means the read failed.], status("v0.1"),
   [CV write result / address], [`<r cv value>` · `<r address>`], [Two shapes under one opcode, told apart by field count. Value `-1` means failure. The address form may read `<r LONG n UNSUPPORTED>` for a long address the decoder cannot hold.], status("v0.1"),
-  [Callback-tagged result], [`<rN|M|cv value>`], [Reply to the older forms of `<R>`, `<W>`, `<B>` that carry callback numbers. Decoded for completeness, never sent by the library.], status("v0.1"),
+  [Callback-tagged result], [`<rN|M|cv value>`], [Reply to the older forms of `<R>`, `<W>`, `<B>` that carry callback numbers. The library never sends those forms. Reported as unrecognized: the format is shared by reads and writes, so the reply alone cannot say which it is.], status("later"),
   [Address written], [`<w address>`], [Reply to `<W address>`. Negative on failure.], status("v0.1"),
   [Command failed], [`<X>`], [Sent for any command the station could not parse or accept, including a programming request while another is pending. Not correlated to a specific command.], status("v0.1"),
   [Diagnostic], [`<* text *>`], [Human-readable. Passed through as text.], status("v0.1"),
@@ -285,35 +285,57 @@ The tokenizer stores only a view and a position. Fields are views into the messa
 
 `to_integer` accepts a plain decimal integer: an optional `-` for signed types, then one or more digits. It rejects `+`, hexadecimal, embedded whitespace, quoted fields, and any value that does not fit the target type, leaving `out` unchanged. The target type is the caller's choice: `std::uint32_t` for function maps, `std::int16_t` for CV values that may be `-1`.
 
-== Decoder and handler
+== Decoder
+
+The decoder is a pure function from one message to one event. The application's handler is a single `switch` on the event type, so code common to several event types lives in one place.
 
 ```cpp
-struct LocoState   { std::uint16_t cab; std::int8_t speed; bool forward;
-                     bool estop; std::uint32_t functions; };
-struct PowerState  { char track; bool on; };          // 'A'..'H'
-struct CvResult    { std::int16_t cv; std::int16_t value; bool ok; };
-struct Version     { std::uint8_t major, minor, patch; StringView detail; };
-
-struct Handler {
-  void* ctx;
-  void (*loco)(void* ctx, const LocoState&);
-  void (*power_track)(void* ctx, const PowerState&);
-  void (*power_all)(void* ctx, bool on);
-  void (*power_role)(void* ctx, Role role);           // MAIN, PROG, JOIN on
-  void (*cv_read)(void* ctx, const CvResult&);
-  void (*cv_written)(void* ctx, const CvResult&);
-  void (*address_read)(void* ctx, std::int16_t address);
-  void (*address_written)(void* ctx, std::int16_t address);
-  void (*version)(void* ctx, const Version&);
-  void (*failed)(void* ctx);                          // <X>
-  void (*diagnostic)(void* ctx, StringView text);
-  void (*unhandled)(void* ctx, StringView raw);       // everything else
+enum class EventType : std::uint8_t {
+  Unhandled, Loco, LocoForgotten, PowerAll, PowerTrack, PowerRole,
+  Version, CvRead, CvWritten, AddressRead, AddressWritten, Failed, Diagnostic,
 };
 
-Result decode(StringView msg, const Handler& h);
+struct Event {
+  EventType type;
+  StringView message;        // always the full message
+  union {                    // read the member named by type
+    Unhandled unhandled;     // { bool malformed; }
+    LocoState loco;          // { cab, speed 0..126, forward, emergency_stop, functions }
+    std::uint16_t cab;       // LocoForgotten
+    Power power;             // { on, track 'A'..'H', role MAIN/PROG/JOIN }
+    Version version;         // { major, minor, patch, text }
+    CvResult cv;             // { cv, value }; ok() is value >= 0
+    AddressResult address;   // { address, long_unsupported }; ok() is address > 0
+    StringView text;         // Diagnostic, markers removed
+  };
+};
+
+Event decode(StringView message);
 ```
 
-Any null callback is skipped. A message that matches a known opcode but has malformed fields goes to `unhandled` and is counted; it is never silently reinterpreted.
+Typical use, inside the framer callback:
+
+```cpp
+const Event e = decode(message);
+switch (e.type) {
+  case EventType::Loco:     update_loco(e.loco); break;
+  case EventType::PowerAll: show_power(e.power.on); break;
+  case EventType::Unhandled:
+    if (e.unhandled.malformed) ++malformed_count;
+    break;
+  default: break;
+}
+```
+
+Rules:
+
+- Every message yields exactly one event. Nothing is silently dropped or reinterpreted.
+- `Unhandled` covers two cases, told apart by `malformed`. Unrecognized: an unknown opcode, or a valid form the library does not support yet (bit verify, callback-tagged results, `LOCOID` and `CONSIST` replies). Malformed: a known opcode whose fields are missing, extra, non-numeric, or outside DCC ranges.
+- Decoded values are range-checked: addresses 1 to 10239, CVs 1 to 1024, CV values -1 to 255, speed byte 0 to 255, functions 0 to 2#super[32]-1. A loco broadcast for address 0, which the station sends when it has no loco, is therefore malformed.
+- Loco speed is reported in client terms (0 to 126), with emergency stop as a separate flag, so applications never handle the DCC speed code.
+- Version parsing requires the product `DCC-EX` and a `V-major.minor.patch` field. Text after the patch number, such as `-Devel`, is allowed.
+- Diagnostic text has the leading and trailing `*` markers and surrounding whitespace removed.
+- Every `StringView` in an event points into the caller's message. The event must not outlive it.
 
 == Encoder
 
@@ -358,10 +380,9 @@ All fallible operations return a small result type carrying either a value or on
   [Code], [Meaning],
   [`BufferTooSmall`], [Encoder output buffer cannot hold the command.],
   [`OutOfRange`], [An encoder argument is outside its protocol range.],
-  [`Malformed`], [A message with a known opcode had unparseable fields.],
 )
 
-Framing problems are not errors either: the framer counts dropped messages and keeps going.
+Framing and decoding problems are not errors either: the framer counts dropped messages, and the decoder reports malformed messages as `Unhandled` events.
 
 Protocol-level failures reported by the station (`<X>`, a `-1` CV value) are events, not library errors.
 
