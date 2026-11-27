@@ -9,9 +9,10 @@ namespace dccex {
 
 // Splits a byte stream into DCC-EX messages delimited by '<' and '>'.
 //
-// Feed it bytes exactly as they arrive from the transport, in chunks up to
-// 'MaxMessage' size. Each complete message is passed to the callback without
-// its delimiters. Framing rules:
+// Feed it bytes exactly as they arrive from the transport, in chunks of any
+// size: a message may span several chunks, and one chunk may hold many
+// messages. Each complete message of up to MaxMessage bytes is passed to the
+// callback without its delimiters. Framing rules:
 //
 //   - Bytes outside a message (newlines, noise, a stray '>') are discarded.
 //   - A '<' inside an open message abandons it and starts a new one
