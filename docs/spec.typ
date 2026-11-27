@@ -108,8 +108,11 @@ app calls ──▶ Encoder ──▶ caller buffer ──▶ app writes to sock
 - A message starts with `<` and ends with the next `>`. The command station terminates replies with a newline; the library must not depend on it.
 - One read from the transport may contain several messages, part of one, or both. The framer must handle every split, down to one byte per `feed()` call.
 - Bytes outside a message (newlines, noise) are discarded.
+- A `>` outside a message is discarded.
+- An empty message, `<>`, is delivered as an empty message.
 - A message longer than the framer capacity is dropped whole. The framer resynchronizes at the next `<` and counts the drop.
-- A `<` inside an open message restarts framing at that byte.
+- A `<` inside an open message abandons the partial message, counts the drop, and starts a new message at that byte.
+- Message content is passed through byte for byte. The framer does not interpret it.
 - Commands sent by the library are written as `<...>` followed by a newline.
 
 Diagnostic messages have the form `<* text *>`. They are human-readable, may contain any characters except `>`, and are reported to the application as raw text.
@@ -226,16 +229,25 @@ namespace dccex {
 template <std::size_t MaxMessage = 256>
 class Framer {
 public:
-  // Feed any number of bytes. Calls on_message once per complete message,
-  // with the text between '<' and '>' (exclusive). Returns bytes consumed.
-  std::size_t feed(const char* data, std::size_t len,
-                   void (*on_message)(void* ctx, StringView msg), void* ctx);
-  std::uint32_t dropped() const;   // messages discarded for overflow
+  using Callback = void (*)(void* ctx, StringView message);
+
+  static constexpr std::size_t capacity();   // == MaxMessage
+
+  // Consumes all len bytes. Calls on_message once per complete message with
+  // the text between '<' and '>' (exclusive). on_message may be null.
+  void feed(const char* data, std::size_t len, Callback on_message, void* ctx);
+
+  // Messages discarded for overflow or abandoned by a new '<'. Saturates.
+  std::uint32_t dropped() const;
+
+  // Back to the initial state: partial message discarded, count cleared.
   void reset();
 };
 
 }
 ```
+
+The view passed to the callback points into the framer's buffer and is valid only until the callback returns. The callback must not call `feed()` or `reset()` on the same framer. Storage is `MaxMessage` bytes plus a few words of state.
 
 == Decoder and handler
 
@@ -311,8 +323,9 @@ All fallible operations return a small result type carrying either a value or on
   [`BufferTooSmall`], [Encoder output buffer cannot hold the command.],
   [`OutOfRange`], [An encoder argument is outside its protocol range.],
   [`Malformed`], [A message with a known opcode had unparseable fields.],
-  [`Overflow`], [The framer dropped a message longer than its capacity.],
 )
+
+Framing problems are not errors either: the framer counts dropped messages and keeps going.
 
 Protocol-level failures reported by the station (`<X>`, a `-1` CV value) are events, not library errors.
 
@@ -321,6 +334,7 @@ Protocol-level failures reported by the station (`<X>`, a `-1` CV value) are eve
 - *Host unit tests* for every layer, built with the host compiler.
 - *Captured traffic as fixtures.* Real byte streams from the layout, replayed through the framer and decoder, with expected events. Initial captures: the power-on burst after `<1>`, loco broadcasts from a WiThrottle client, and the `<t>` reply to a direct throttle command.
 - *Split-point tests.* Every fixture is also fed one byte at a time, and at every possible split into two chunks.
+- *Chunking property.* Random delimiter-heavy streams must produce identical messages and drop counts whether fed whole or in random chunks.
 - *Fuzzing.* The framer and decoder are fuzzed with libFuzzer on the host. The only requirement is no crash, no out-of-bounds access, and no unbounded loop.
 - *Freestanding check.* A CI job compiles the library with `-ffreestanding -fno-exceptions -fno-rtti` and an include allow-list.
 - *Embedded smoke build.* A CI job cross-compiles for at least one bare-metal target (for example Cortex-M with `arm-none-eabi-g++`) to catch toolchain differences early.

@@ -12,12 +12,35 @@ and the EX-CommandStation source, and aims to be compatible with DCC-EX.
 
 ## Status
 
-Early design. See the specification in [`docs/spec.typ`](docs/spec.typ).
+Early development. Implemented so far: the framer, which splits a byte stream into messages.
+The design is in [`docs/spec.typ`](docs/spec.typ); build the PDF with
+[Typst](https://typst.app): `typst compile docs/spec.typ`.
 
-Build the PDF with [Typst](https://typst.app):
+## Building and testing
+
+Requires CMake 3.21+ and a C++17 compiler. Tests use [doctest](https://github.com/doctest/doctest),
+fetched automatically.
 
 ```sh
-typst compile docs/spec.typ
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build
+```
+
+Besides the unit tests, `ctest` runs two design-rule checks:
+
+- `check.include_allowlist`: library headers may only include freestanding standard headers.
+- `check.no_allocation`: the library compiled with `-ffreestanding -fno-exceptions -fno-rtti`
+  must not reference `operator new`, `malloc`, or exception runtime symbols.
+
+## Using it
+
+The library target is `dccex::dccex`. With CMake `FetchContent`:
+
+```cmake
+FetchContent_Declare(libdccex GIT_REPOSITORY https://github.com/mfiore02/libdccex.git GIT_TAG main)
+FetchContent_MakeAvailable(libdccex)
+target_link_libraries(your_app PRIVATE dccex::dccex)
 ```
 
 ## License
