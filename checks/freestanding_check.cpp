@@ -2,21 +2,46 @@
 // The no-allocation check inspects this object's undefined symbols, so every
 // library component must be included and instantiated here.
 
+#include <cstdint>
+
 #include "dccex/framer.hpp"
 #include "dccex/string_view.hpp"
+#include "dccex/tokenizer.hpp"
 
 namespace {
 
+struct Totals {
+  std::size_t bytes = 0;
+  std::int64_t sum = 0;
+};
+
 void on_message(void* ctx, dccex::StringView message) {
-  auto* total = static_cast<std::size_t*>(ctx);
-  *total += message.size();
+  auto* totals = static_cast<Totals*>(ctx);
+  totals->bytes += message.size();
+
+  dccex::Tokenizer tokens(message);
+  dccex::Field field;
+  while (tokens.next(field)) {
+    std::int8_t i8 = 0;
+    std::uint16_t u16 = 0;
+    std::int32_t i32 = 0;
+    std::uint32_t u32 = 0;
+    if (field.to_integer(i8)) totals->sum += i8;
+    if (field.to_integer(u16)) totals->sum += u16;
+    if (field.to_integer(i32)) totals->sum += i32;
+    if (field.to_integer(u32)) totals->sum += u32;
+    if (field.equals("MAIN")) totals->sum += 1;
+  }
+  if (tokens.malformed()) totals->sum -= 1;
+  totals->bytes += tokens.count() + tokens.rest().size();
+  if (tokens.at(1, field)) totals->bytes += field.text.size();
 }
 
 }  // namespace
 
-std::size_t dccex_freestanding_check(const char* data, std::size_t len) {
+std::int64_t dccex_freestanding_check(const char* data, std::size_t len) {
   static dccex::Framer<> framer;
-  std::size_t total = 0;
-  framer.feed(data, len, on_message, &total);
-  return total + framer.dropped();
+  Totals totals;
+  framer.feed(data, len, on_message, &totals);
+  return totals.sum + static_cast<std::int64_t>(totals.bytes + framer.dropped());
 }

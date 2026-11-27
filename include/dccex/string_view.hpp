@@ -12,6 +12,11 @@ public:
   constexpr StringView(const char* data, std::size_t size) noexcept
       : data_(data), size_(size) {}
 
+  // From a null-terminated string. Implicit, so literals can be passed where a
+  // StringView is expected. A null pointer gives an empty view.
+  constexpr StringView(const char* cstr) noexcept  // NOLINT(google-explicit-constructor)
+      : data_(cstr), size_(length(cstr)) {}
+
   constexpr const char* data() const noexcept { return data_; }
   constexpr std::size_t size() const noexcept { return size_; }
   constexpr bool empty() const noexcept { return size_ == 0; }
@@ -33,6 +38,14 @@ public:
   }
 
 private:
+  static constexpr std::size_t length(const char* s) noexcept {
+    std::size_t n = 0;
+    if (s != nullptr) {
+      while (s[n] != '\0') ++n;
+    }
+    return n;
+  }
+
   const char* data_ = nullptr;
   std::size_t size_ = 0;
 };

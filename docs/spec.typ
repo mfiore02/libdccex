@@ -88,7 +88,7 @@ The library is a set of layers. Each layer is usable on its own, and each depend
   inset: 6pt,
   [Layer], [Responsibility], [State],
   [Framer], [Accepts arbitrary byte chunks. Emits complete messages delimited by `<` and `>`. Discards bytes outside a message. Enforces a maximum message length and recovers from overflow.], [Fixed buffer],
-  [Tokenizer], [Splits one message into an opcode and fields. Recognizes integers, keywords, quoted strings, and the `|`-joined callback prefix used by some replies.], [None],
+  [Tokenizer], [Splits one message into an opcode and fields, including quoted strings. Parses fields as integers on request. Structure inside a field, such as `|`-joined callback tags, is left to the decoder.], [None],
   [Decoder], [Turns tokenized messages into typed events and calls the handler. Unknown or unsupported messages go to a catch-all handler, never an error.], [None],
   [Encoder], [Writes commands into a caller-provided buffer. Validates arguments against protocol ranges before writing.], [None],
 )
@@ -248,6 +248,42 @@ public:
 ```
 
 The view passed to the callback points into the framer's buffer and is valid only until the callback returns. The callback must not call `feed()` or `reset()` on the same framer. Storage is `MaxMessage` bytes plus a few words of state.
+
+== Tokenizer
+
+The opcode is the first character of a message, and fields begin immediately after it. In `p1 MAIN` the opcode is `p` and the fields are `1` and `MAIN`; in `jR 3` the fields are `R` and `3`.
+
+- Fields are separated by runs of spaces, tabs, CR or LF.
+- A field starting with `"` runs to the next `"` and may contain whitespace. The quotes are not part of the field. A quote anywhere else is an ordinary character. There are no escapes, matching the station, which never escapes quotes.
+- An unterminated quote ends iteration and marks the message malformed.
+- `rest()` returns everything after the opcode, for messages that are free text: diagnostics and the version string.
+
+```cpp
+struct Field {
+  StringView text;     // view into the message, quotes excluded
+  bool quoted;
+
+  bool equals(StringView other) const;    // exact, case-sensitive
+  template <typename T> bool to_integer(T& out) const;
+};
+
+class Tokenizer {
+public:
+  explicit Tokenizer(StringView message);
+
+  char opcode() const;          // '\0' for an empty message
+  StringView rest() const;      // after the opcode, leading whitespace removed
+  bool next(Field& out);        // false at end or unterminated quote
+  void rewind();
+  std::size_t count() const;    // independent of iteration position
+  bool at(std::size_t index, Field& out) const;
+  bool malformed() const;       // set once iteration hits an unterminated quote
+};
+```
+
+The tokenizer stores only a view and a position. Fields are views into the message, so the message must outlive them; in practice the decoder tokenizes inside the framer callback. `count()` and `at()` rescan from the start, which is cheap at DCC-EX message sizes.
+
+`to_integer` accepts a plain decimal integer: an optional `-` for signed types, then one or more digits. It rejects `+`, hexadecimal, embedded whitespace, quoted fields, and any value that does not fit the target type, leaving `out` unchanged. The target type is the caller's choice: `std::uint32_t` for function maps, `std::int16_t` for CV values that may be `-1`.
 
 == Decoder and handler
 

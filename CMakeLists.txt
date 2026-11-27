@@ -44,7 +44,9 @@ if(DCCEX_BUILD_TESTS)
 
   add_executable(dccex_tests
     tests/main.cpp
-    tests/framer_test.cpp)
+    tests/framer_test.cpp
+    tests/string_view_test.cpp
+    tests/tokenizer_test.cpp)
   target_link_libraries(dccex_tests PRIVATE dccex::dccex doctest::doctest)
   target_include_directories(dccex_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
   target_compile_options(dccex_tests PRIVATE ${DCCEX_WARNINGS})
