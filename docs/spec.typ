@@ -330,6 +330,7 @@ Protocol-level failures reported by the station (`<X>`, a `-1` CV value) are eve
 - CMake, minimum version to be chosen with the first scaffold. One library target, `dccex::dccex`.
 - Consumable through `FetchContent`, a git submodule, or an installed CMake package.
 - Semantic versioning from 0.1.0. Breaking changes are expected before 1.0.
+- Licensed under MIT. DCC-EX itself is GPL-3.0; libdccex is an independent implementation written from the published protocol documentation and contains no DCC-EX code.
 
 = Open questions
 
@@ -338,7 +339,6 @@ Protocol-level failures reported by the station (`<X>`, a `-1` CV value) are eve
   stroke: 0.5pt + luma(200),
   inset: 5pt,
   [Topic], [Question],
-  [License], [MIT proposed. DCC-EX is GPL-3.0; this library is an independent implementation from published documentation.],
   [C interface], [An `extern "C"` wrapper for use from other languages. Deferred.],
   [Programming replies via JMRI], [Are `<v>`, `<r>`, `<w>` relayed, and to whom.],
   [Roster], [Station roster (`<J R>`) versus JMRI roster (web API) as the throttle's source of loco names.],

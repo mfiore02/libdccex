@@ -19,3 +19,7 @@ Build the PDF with [Typst](https://typst.app):
 ```sh
 typst compile docs/spec.typ
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
