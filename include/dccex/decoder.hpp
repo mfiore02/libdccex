@@ -63,8 +63,30 @@ struct AddressResult {
   constexpr bool ok() const noexcept { return address > 0 && !long_unsupported; }
 };
 
+// Why a message could not be decoded. The first two mean the library does
+// not handle the message; the rest mean the message itself is bad.
+enum class Reason : std::uint8_t {
+  UnknownOpcode,      // opcode the library does not decode
+  UnsupportedForm,    // valid reply the library does not support yet
+  WrongFieldCount,    // too few or too many fields
+  NotANumber,         // field should be a decimal integer (quoted numbers are text)
+  OutOfRange,         // integer outside the protocol or DCC range
+  UnknownKeyword,     // field should be one of a fixed set of words
+  BadFormat,          // field has the wrong internal structure, e.g. a version not V-x.y.z
+  UnterminatedQuote,  // a quoted field has no closing quote
+};
+
 struct Unhandled {
-  bool malformed;            // known opcode with unusable fields
+  static constexpr std::uint8_t kNoField = 0xFF;
+
+  Reason reason;
+  std::uint8_t field;        // zero-based index of the offending field, or kNoField
+
+  // True when the message is bad, false when the library simply does not
+  // handle it (UnknownOpcode, UnsupportedForm).
+  constexpr bool malformed() const noexcept {
+    return reason != Reason::UnknownOpcode && reason != Reason::UnsupportedForm;
+  }
 };
 
 // One decoded message. Read the member named by `type`; the others are
@@ -84,12 +106,18 @@ struct Event {
     StringView text;
   };
 
-  constexpr Event() noexcept : type(EventType::Unhandled), message(), unhandled{false} {}
+  constexpr Event() noexcept
+      : type(EventType::Unhandled), message(), unhandled{Reason::UnknownOpcode, Unhandled::kNoField} {}
 };
 
 // Decodes one message (the text between '<' and '>', as delivered by the
 // Framer). Every message yields exactly one event; anything not recognized,
 // or recognized with fields out of range, yields EventType::Unhandled.
 Event decode(StringView message) noexcept;
+
+// Fixed names for logging, e.g. "Loco" or "OutOfRange". Never null; "?" for a
+// value outside the enumeration.
+const char* name(EventType type) noexcept;
+const char* name(Reason reason) noexcept;
 
 }  // namespace dccex

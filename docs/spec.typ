@@ -110,8 +110,8 @@ app calls ──▶ Encoder ──▶ caller buffer ──▶ app writes to sock
 - Bytes outside a message (newlines, noise) are discarded.
 - A `>` outside a message is discarded.
 - An empty message, `<>`, is delivered as an empty message.
-- A message longer than the framer capacity is dropped whole. The framer resynchronizes at the next `<` and counts the drop.
-- A `<` inside an open message abandons the partial message, counts the drop, and starts a new message at that byte.
+- A message longer than the framer capacity is dropped whole and counted as overflowed. The framer resynchronizes at the next `<`.
+- A `<` inside an open message abandons the partial message, counts it as abandoned, and starts a new message at that byte.
 - Message content is passed through byte for byte. The framer does not interpret it.
 - Commands sent by the library are written as `<...>` followed by a newline.
 
@@ -237,15 +237,20 @@ public:
   // the text between '<' and '>' (exclusive). on_message may be null.
   void feed(const char* data, std::size_t len, Callback on_message, void* ctx);
 
-  // Messages discarded for overflow or abandoned by a new '<'. Saturates.
-  std::uint32_t dropped() const;
+  // Messages longer than MaxMessage, dropped whole. Saturates.
+  std::uint32_t overflowed() const;
 
-  // Back to the initial state: partial message discarded, count cleared.
+  // Partial messages abandoned by a new '<' before their '>'. Saturates.
+  std::uint32_t abandoned() const;
+
+  // Back to the initial state: partial message discarded, counters cleared.
   void reset();
 };
 
 }
 ```
+
+The two counters answer different questions. A rising `overflowed()` count means the traffic contains messages longer than the buffer, so `MaxMessage` should grow. A rising `abandoned()` count means messages are arriving incomplete, which points to bytes lost or damaged in transit.
 
 The view passed to the callback points into the framer's buffer and is valid only until the callback returns. The callback must not call `feed()` or `reset()` on the same framer. Storage is `MaxMessage` bytes plus a few words of state.
 
@@ -299,7 +304,7 @@ struct Event {
   EventType type;
   StringView message;        // always the full message
   union {                    // read the member named by type
-    Unhandled unhandled;     // { bool malformed; }
+    Unhandled unhandled;     // { reason, field }; malformed()
     LocoState loco;          // { cab, speed 0..126, forward, emergency_stop, functions }
     std::uint16_t cab;       // LocoForgotten
     Power power;             // { on, track 'A'..'H', role MAIN/PROG/JOIN }
@@ -321,7 +326,8 @@ switch (e.type) {
   case EventType::Loco:     update_loco(e.loco); break;
   case EventType::PowerAll: show_power(e.power.on); break;
   case EventType::Unhandled:
-    if (e.unhandled.malformed) ++malformed_count;
+    log("unhandled %s at field %d: %.*s", name(e.unhandled.reason),
+        e.unhandled.field, int(e.message.size()), e.message.data());
     break;
   default: break;
 }
@@ -330,12 +336,38 @@ switch (e.type) {
 Rules:
 
 - Every message yields exactly one event. Nothing is silently dropped or reinterpreted.
-- `Unhandled` covers two cases, told apart by `malformed`. Unrecognized: an unknown opcode, or a valid form the library does not support yet (bit verify, callback-tagged results, `LOCOID` and `CONSIST` replies). Malformed: a known opcode whose fields are missing, extra, non-numeric, or outside DCC ranges.
+- `Unhandled` carries the reason the message was not decoded and the zero-based index of the field responsible, or `Unhandled::kNoField` when no single field is at fault. Decoding stops at the first problem, so the reason describes the first bad field. See the reasons table below.
 - Decoded values are range-checked: addresses 1 to 10239, CVs 1 to 1024, CV values -1 to 255, speed byte 0 to 255, functions 0 to 2#super[32]-1. A loco broadcast for address 0, which the station sends when it has no loco, is therefore malformed.
 - Loco speed is reported in client terms (0 to 126), with emergency stop as a separate flag, so applications never handle the DCC speed code.
 - Version parsing requires the product `DCC-EX` and a `V-major.minor.patch` field. Text after the patch number, such as `-Devel`, is allowed.
 - Diagnostic text has the leading and trailing `*` markers and surrounding whitespace removed.
 - Every `StringView` in an event points into the caller's message. The event must not outlive it.
+
+#table(
+  columns: (auto, auto, 1fr),
+  stroke: 0.5pt + luma(200),
+  inset: 5pt,
+  [Reason], [Malformed], [Meaning],
+  [`UnknownOpcode`], [no], [The library does not decode this opcode.],
+  [`UnsupportedForm`], [no], [A valid reply the library does not support yet: bit verify, callback-tagged results, `LOCOID` and `CONSIST` replies.],
+  [`WrongFieldCount`], [yes], [Too few or too many fields.],
+  [`NotANumber`], [yes], [A field that must be a decimal integer is not one. Quoted numbers are text.],
+  [`OutOfRange`], [yes], [An integer outside its protocol or DCC range.],
+  [`UnknownKeyword`], [yes], [A field that must be one of a fixed set of words is not.],
+  [`BadFormat`], [yes], [A field has the wrong internal structure, such as a version not in `V-x.y.z` form.],
+  [`UnterminatedQuote`], [yes], [A quoted field has no closing quote. Reported at the field where the quote opens.],
+)
+
+`Unhandled::malformed()` is true when the message itself is bad, and false when the library simply does not handle it.
+
+== Names for logging
+
+```cpp
+const char* name(EventType type);   // "Loco", "PowerTrack", ...
+const char* name(Reason reason);    // "OutOfRange", "UnknownKeyword", ...
+```
+
+Both return fixed strings and never null; a value outside the enumeration gives `"?"`. They let applications log events and rejections readably without a lookup table of their own.
 
 == Encoder
 
@@ -379,7 +411,7 @@ The library separates three kinds of problem and reports each one differently. O
   inset: 6pt,
   [Kind], [Example], [How it is reported],
   [Caller mistake], [Asking the encoder for speed 200, or giving it a buffer too small for the command.], [An error code, returned immediately. Nothing is written.],
-  [Bad incoming data], [Bytes damaged in transit, a reply longer than the framer buffer, a loco broadcast for address 0.], [Not an error. The library recovers and keeps going: the framer counts the drop, the decoder returns an `Unhandled` event with `malformed` set.],
+  [Bad incoming data], [Bytes damaged in transit, a reply longer than the framer buffer, a loco broadcast for address 0.], [Not an error. The library recovers and keeps going: the framer counts the dropped message, the decoder returns an `Unhandled` event with a malformed reason.],
   [Station-reported failure], [`<X>` for a rejected command, or a CV read that returns `-1`.], [Not an error. These are valid replies, delivered as ordinary events (`Failed`, or a result whose `ok()` is false).],
 )
 
@@ -406,8 +438,8 @@ Problems in data from the network or the command station are not errors, for thr
 
 So the library recovers and reports through its normal outputs:
 
-- The framer discards the damaged or oversized message, resynchronizes at the next `<`, and increments `dropped()`. A steadily rising count points to a bad link or a framer buffer that is too small.
-- The decoder returns an `Unhandled` event with `malformed` set, carrying the original message text. The application sees it in its usual handler and can log it, count it, or ignore it. Every message still yields exactly one event; there is no separate error path.
+- The framer discards the damaged or oversized message, resynchronizes at the next `<`, and increments `abandoned()` or `overflowed()`. A rising `abandoned()` count points to a bad link; a rising `overflowed()` count to a framer buffer that is too small.
+- The decoder returns an `Unhandled` event whose reason says what was wrong and in which field, carrying the original message text. The application sees it in its usual handler and can log it, count it, or ignore it. Every message still yields exactly one event; there is no separate error path.
 
 == Station-reported failures
 

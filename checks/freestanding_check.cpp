@@ -4,6 +4,7 @@
 
 #include <cstdint>
 
+#include "dccex/decoder.hpp"
 #include "dccex/framer.hpp"
 #include "dccex/string_view.hpp"
 #include "dccex/tokenizer.hpp"
@@ -35,6 +36,13 @@ void on_message(void* ctx, dccex::StringView message) {
   if (tokens.malformed()) totals->sum -= 1;
   totals->bytes += tokens.count() + tokens.rest().size();
   if (tokens.at(1, field)) totals->bytes += field.text.size();
+
+  const dccex::Event e = dccex::decode(message);
+  totals->bytes += dccex::StringView(dccex::name(e.type)).size();
+  if (e.type == dccex::EventType::Unhandled) {
+    totals->bytes += dccex::StringView(dccex::name(e.unhandled.reason)).size() + e.unhandled.field;
+    if (e.unhandled.malformed()) totals->sum -= 1;
+  }
 }
 
 }  // namespace
@@ -43,5 +51,5 @@ std::int64_t dccex_freestanding_check(const char* data, std::size_t len) {
   static dccex::Framer<> framer;
   Totals totals;
   framer.feed(data, len, on_message, &totals);
-  return totals.sum + static_cast<std::int64_t>(totals.bytes + framer.dropped());
+  return totals.sum + static_cast<std::int64_t>(totals.bytes + framer.overflowed() + framer.abandoned());
 }

@@ -11,38 +11,80 @@ namespace {
 constexpr std::uint16_t kMaxCab = 10239;
 constexpr std::uint16_t kMaxCv = 1024;
 
-// Result of decoding one opcode: either an event or a reason it is unhandled.
-enum class Outcome : std::uint8_t { Decoded, Unrecognized, Malformed };
+constexpr std::uint8_t kNoField = Unhandled::kNoField;
 
-// Parses field `index` as an integer in [lo, hi].
-template <typename T>
-bool int_field(const Tokenizer& t, std::size_t index, T lo, T hi, T& out) noexcept {
-  Field f;
-  T value{};
-  if (!t.at(index, f) || !f.to_integer(value)) return false;
-  if (value < lo || value > hi) return false;
-  out = value;
+// Outcome of decoding one message or checking one field: success, or the
+// reason it failed and the field responsible.
+struct Verdict {
+  bool ok;
+  Reason reason;
+  std::uint8_t field;
+};
+
+constexpr Verdict pass() noexcept { return {true, Reason::UnknownOpcode, kNoField}; }
+
+constexpr Verdict reject(Reason reason, std::size_t field = kNoField) noexcept {
+  return {false, reason, field < kNoField ? static_cast<std::uint8_t>(field) : kNoField};
+}
+
+// True if the field has the shape of a decimal integer, whether or not the
+// value fits a particular type. Tells NotANumber apart from OutOfRange.
+bool looks_like_integer(const Field& f) noexcept {
+  if (f.quoted || f.text.empty()) return false;
+  std::size_t i = f.text[0] == '-' ? 1 : 0;
+  if (i == f.text.size()) return false;
+  for (; i < f.text.size(); ++i) {
+    if (f.text[i] < '0' || f.text[i] > '9') return false;
+  }
   return true;
 }
 
-bool keyword_field(const Tokenizer& t, std::size_t index, StringView keyword) noexcept {
+// Field `index` as an integer of type T within [lo, hi].
+template <typename T>
+Verdict int_field(const Tokenizer& t, std::size_t index, T lo, T hi, T& out) noexcept {
   Field f;
-  return t.at(index, f) && !f.quoted && f.equals(keyword);
+  if (!t.at(index, f)) return reject(Reason::WrongFieldCount);
+  if (!looks_like_integer(f)) return reject(Reason::NotANumber, index);
+  T value{};
+  if (!f.to_integer(value) || value < lo || value > hi) return reject(Reason::OutOfRange, index);
+  out = value;
+  return pass();
 }
 
+// Field `index` is the unquoted word `keyword`.
+Verdict keyword_field(const Tokenizer& t, std::size_t index, StringView keyword) noexcept {
+  Field f;
+  if (!t.at(index, f)) return reject(Reason::WrongFieldCount);
+  if (f.quoted || !f.equals(keyword)) return reject(Reason::UnknownKeyword, index);
+  return pass();
+}
+
+bool is_keyword(const Tokenizer& t, std::size_t index, StringView keyword) noexcept {
+  return keyword_field(t, index, keyword).ok;
+}
+
+Verdict field_count(const Tokenizer& t, std::size_t expected) noexcept {
+  return t.count() == expected ? pass() : reject(Reason::WrongFieldCount);
+}
+
+// Evaluates a Verdict-returning expression and returns early if it failed.
+#define DCCEX_CHECK(expr)          \
+  do {                             \
+    const Verdict v_ = (expr);     \
+    if (!v_.ok) return v_;         \
+  } while (false)
+
 // <l cab reg speedbyte functions>
-Outcome decode_loco(const Tokenizer& t, Event& e) noexcept {
+Verdict decode_loco(const Tokenizer& t, Event& e) noexcept {
   std::uint16_t cab = 0;
   std::int32_t reg = 0;
   std::uint8_t speed_byte = 0;
   std::uint32_t functions = 0;
-  if (t.count() != 4 ||
-      !int_field<std::uint16_t>(t, 0, 1, kMaxCab, cab) ||
-      !int_field<std::int32_t>(t, 1, INT32_MIN, INT32_MAX, reg) ||  // legacy, ignored
-      !int_field<std::uint8_t>(t, 2, 0, 255, speed_byte) ||
-      !int_field<std::uint32_t>(t, 3, 0, UINT32_MAX, functions)) {
-    return Outcome::Malformed;
-  }
+  DCCEX_CHECK(field_count(t, 4));
+  DCCEX_CHECK(int_field<std::uint16_t>(t, 0, 1, kMaxCab, cab));
+  DCCEX_CHECK(int_field<std::int32_t>(t, 1, INT32_MIN, INT32_MAX, reg));  // legacy, ignored
+  DCCEX_CHECK(int_field<std::uint8_t>(t, 2, 0, 255, speed_byte));
+  DCCEX_CHECK(int_field<std::uint32_t>(t, 3, 0, UINT32_MAX, functions));
 
   // Bit 7: direction. Bits 0-6: DCC speed code, 0 stop, 1 emergency stop,
   // 2..127 running, which is client speed + 1.
@@ -53,50 +95,51 @@ Outcome decode_loco(const Tokenizer& t, Event& e) noexcept {
   e.loco.emergency_stop = code == 1;
   e.loco.speed = code >= 2 ? static_cast<std::uint8_t>(code - 1) : 0;
   e.loco.functions = functions;
-  return Outcome::Decoded;
+  return pass();
 }
 
 // <- cab>
-Outcome decode_forget(const Tokenizer& t, Event& e) noexcept {
+Verdict decode_forget(const Tokenizer& t, Event& e) noexcept {
   std::uint16_t cab = 0;
-  if (t.count() != 1 || !int_field<std::uint16_t>(t, 0, 1, kMaxCab, cab)) return Outcome::Malformed;
+  DCCEX_CHECK(field_count(t, 1));
+  DCCEX_CHECK(int_field<std::uint16_t>(t, 0, 1, kMaxCab, cab));
   e.type = EventType::LocoForgotten;
   e.cab = cab;
-  return Outcome::Decoded;
+  return pass();
 }
 
 // <p0> <p1> | <p1 A>..<p1 H> | <p1 MAIN> <p1 PROG> <p1 JOIN>
-Outcome decode_power(const Tokenizer& t, Event& e) noexcept {
+Verdict decode_power(const Tokenizer& t, Event& e) noexcept {
+  const std::size_t n = t.count();
+  if (n != 1 && n != 2) return reject(Reason::WrongFieldCount);
+
   std::uint8_t state = 0;
-  if (!int_field<std::uint8_t>(t, 0, 0, 1, state)) return Outcome::Malformed;
+  DCCEX_CHECK(int_field<std::uint8_t>(t, 0, 0, 1, state));
   e.power.on = state == 1;
   e.power.track = '\0';
   e.power.role = Role::Main;
 
-  const std::size_t n = t.count();
   if (n == 1) {
     e.type = EventType::PowerAll;
-    return Outcome::Decoded;
+    return pass();
   }
-  if (n != 2) return Outcome::Malformed;
 
   Field what;
   t.at(1, what);
-  if (what.quoted) return Outcome::Malformed;
-  if (what.text.size() == 1 && what.text[0] >= 'A' && what.text[0] <= 'H') {
+  if (!what.quoted && what.text.size() == 1 && what.text[0] >= 'A' && what.text[0] <= 'H') {
     e.type = EventType::PowerTrack;
     e.power.track = what.text[0];
-    return Outcome::Decoded;
+    return pass();
   }
-  if (what.equals("MAIN")) e.power.role = Role::Main;
-  else if (what.equals("PROG")) e.power.role = Role::Prog;
-  else if (what.equals("JOIN")) e.power.role = Role::Join;
-  else return Outcome::Malformed;
+  if (is_keyword(t, 1, "MAIN")) e.power.role = Role::Main;
+  else if (is_keyword(t, 1, "PROG")) e.power.role = Role::Prog;
+  else if (is_keyword(t, 1, "JOIN")) e.power.role = Role::Join;
+  else return reject(Reason::UnknownKeyword, 1);
   e.type = EventType::PowerRole;
-  return Outcome::Decoded;
+  return pass();
 }
 
-// Parses "<digits>" at text[pos], advancing pos. Fails on no digits or overflow.
+// Parses digits at text[pos], advancing pos. Fails on no digits or overflow.
 bool parse_number(StringView text, std::size_t& pos, std::uint16_t& out) noexcept {
   const std::size_t start = pos;
   while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') ++pos;
@@ -106,20 +149,20 @@ bool parse_number(StringView text, std::size_t& pos, std::uint16_t& out) noexcep
 }
 
 // <iDCC-EX V-major.minor.patch[suffix] / board / shield G-sha>
-Outcome decode_version(const Tokenizer& t, Event& e) noexcept {
-  Field product;
+Verdict decode_version(const Tokenizer& t, Event& e) noexcept {
+  if (t.count() < 2) return reject(Reason::WrongFieldCount);
+  DCCEX_CHECK(keyword_field(t, 0, "DCC-EX"));
+
   Field version;
-  if (!t.at(0, product) || !product.equals("DCC-EX") || !t.at(1, version)) return Outcome::Malformed;
-
+  t.at(1, version);
   const StringView v = version.text;
-  if (v.size() < 2 || v[0] != 'V' || v[1] != '-') return Outcome::Malformed;
-
   std::size_t pos = 2;
   std::uint16_t major = 0, minor = 0, patch = 0;
-  if (!parse_number(v, pos, major) || pos >= v.size() || v[pos++] != '.' ||
+  if (version.quoted || v.size() < 2 || v[0] != 'V' || v[1] != '-' ||
+      !parse_number(v, pos, major) || pos >= v.size() || v[pos++] != '.' ||
       !parse_number(v, pos, minor) || pos >= v.size() || v[pos++] != '.' ||
       !parse_number(v, pos, patch)) {
-    return Outcome::Malformed;
+    return reject(Reason::BadFormat, 1);
   }
 
   e.type = EventType::Version;
@@ -127,119 +170,177 @@ Outcome decode_version(const Tokenizer& t, Event& e) noexcept {
   e.version.minor = minor;
   e.version.patch = patch;
   e.version.text = t.rest();
-  return Outcome::Decoded;
+  return pass();
 }
 
 // Two integer fields: cv in 1..1024, value in -1..255.
-bool cv_fields(const Tokenizer& t, CvResult& out) noexcept {
-  return int_field<std::uint16_t>(t, 0, 1, kMaxCv, out.cv) &&
-         int_field<std::int16_t>(t, 1, -1, 255, out.value);
+Verdict cv_fields(const Tokenizer& t, CvResult& out) noexcept {
+  DCCEX_CHECK(int_field<std::uint16_t>(t, 0, 1, kMaxCv, out.cv));
+  DCCEX_CHECK(int_field<std::int16_t>(t, 1, -1, 255, out.value));
+  return pass();
 }
 
 // <v cv value>
-Outcome decode_verify(const Tokenizer& t, Event& e) noexcept {
+Verdict decode_verify(const Tokenizer& t, Event& e) noexcept {
   const std::size_t n = t.count();
-  if (n == 3) return Outcome::Unrecognized;  // <v cv bit value>: bit verify, not yet supported
-  if (n != 2 || !cv_fields(t, e.cv)) return Outcome::Malformed;
+  if (n == 3) return reject(Reason::UnsupportedForm);  // <v cv bit value>: bit verify
+  if (n != 2) return reject(Reason::WrongFieldCount);
+  DCCEX_CHECK(cv_fields(t, e.cv));
   e.type = EventType::CvRead;
-  return Outcome::Decoded;
+  return pass();
 }
 
 // <r cv value> | <r address> | <r LONG address UNSUPPORTED>
-Outcome decode_read(const Tokenizer& t, Event& e) noexcept {
+Verdict decode_read(const Tokenizer& t, Event& e) noexcept {
   Field first;
-  if (!t.at(0, first)) return Outcome::Malformed;
+  if (!t.at(0, first)) return reject(Reason::WrongFieldCount);
 
   // Forms the library does not send: callback-tagged results and
   // <R LOCOID>/<R CONSIST> replies.
   for (char c : first.text) {
-    if (c == '|') return Outcome::Unrecognized;
+    if (c == '|') return reject(Reason::UnsupportedForm, 0);
   }
-  if (first.equals("LOCOID") || first.equals("CONSIST")) return Outcome::Unrecognized;
+  if (is_keyword(t, 0, "LOCOID") || is_keyword(t, 0, "CONSIST")) {
+    return reject(Reason::UnsupportedForm, 0);
+  }
 
   const std::size_t n = t.count();
-  if (first.equals("LONG")) {
-    if (n != 3 || !keyword_field(t, 2, "UNSUPPORTED") ||
-        !int_field<std::int16_t>(t, 1, INT16_MIN, INT16_MAX, e.address.address)) {
-      return Outcome::Malformed;
-    }
+  if (is_keyword(t, 0, "LONG")) {
+    DCCEX_CHECK(field_count(t, 3));
+    DCCEX_CHECK(int_field<std::int16_t>(t, 1, INT16_MIN, INT16_MAX, e.address.address));
+    DCCEX_CHECK(keyword_field(t, 2, "UNSUPPORTED"));
     e.type = EventType::AddressRead;
     e.address.long_unsupported = true;
-    return Outcome::Decoded;
+    return pass();
   }
-
   if (n == 1) {
-    if (!int_field<std::int16_t>(t, 0, INT16_MIN, INT16_MAX, e.address.address)) return Outcome::Malformed;
+    DCCEX_CHECK(int_field<std::int16_t>(t, 0, INT16_MIN, INT16_MAX, e.address.address));
     e.type = EventType::AddressRead;
     e.address.long_unsupported = false;
-    return Outcome::Decoded;
+    return pass();
   }
   if (n == 2) {
-    if (!cv_fields(t, e.cv)) return Outcome::Malformed;
+    DCCEX_CHECK(cv_fields(t, e.cv));
     e.type = EventType::CvWritten;
-    return Outcome::Decoded;
+    return pass();
   }
-  return Outcome::Malformed;
+  return reject(Reason::WrongFieldCount);
 }
 
 // <w address> | <w CONSIST ...>
-Outcome decode_write(const Tokenizer& t, Event& e) noexcept {
-  if (keyword_field(t, 0, "CONSIST")) return Outcome::Unrecognized;
-  if (t.count() != 1 ||
-      !int_field<std::int16_t>(t, 0, INT16_MIN, INT16_MAX, e.address.address)) {
-    return Outcome::Malformed;
-  }
+Verdict decode_write(const Tokenizer& t, Event& e) noexcept {
+  if (is_keyword(t, 0, "CONSIST")) return reject(Reason::UnsupportedForm, 0);
+  DCCEX_CHECK(field_count(t, 1));
+  DCCEX_CHECK(int_field<std::int16_t>(t, 0, INT16_MIN, INT16_MAX, e.address.address));
   e.type = EventType::AddressWritten;
   e.address.long_unsupported = false;
-  return Outcome::Decoded;
+  return pass();
 }
 
 // <X>
-Outcome decode_failed(const Tokenizer& t, Event& e) noexcept {
-  if (t.count() != 0) return Outcome::Malformed;
+Verdict decode_failed(const Tokenizer& t, Event& e) noexcept {
+  DCCEX_CHECK(field_count(t, 0));
   e.type = EventType::Failed;
-  return Outcome::Decoded;
+  return pass();
 }
+
+#undef DCCEX_CHECK
 
 constexpr bool is_space(char c) noexcept { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
 // <* text *>: free text, closing marker and surrounding whitespace removed.
-Outcome decode_diagnostic(const Tokenizer& t, Event& e) noexcept {
+Verdict decode_diagnostic(const Tokenizer& t, Event& e) noexcept {
   const StringView rest = t.rest();
   std::size_t end = rest.size();
   if (end > 0 && rest[end - 1] == '*') --end;
   while (end > 0 && is_space(rest[end - 1])) --end;
   e.type = EventType::Diagnostic;
   e.text = StringView(rest.data(), end);
-  return Outcome::Decoded;
+  return pass();
+}
+
+// For messages made of fields: an unterminated quote, reported at the field
+// where it starts.
+Verdict check_quotes(const Tokenizer& t) noexcept {
+  Tokenizer scan = t;
+  scan.rewind();
+  Field f;
+  std::size_t n = 0;
+  while (scan.next(f)) ++n;
+  return scan.malformed() ? reject(Reason::UnterminatedQuote, n) : pass();
+}
+
+using Decoder = Verdict (*)(const Tokenizer&, Event&) noexcept;
+
+// Decoders for messages made of fields. Free-text messages are handled apart.
+Decoder field_decoder(char opcode) noexcept {
+  switch (opcode) {
+    case 'l': return decode_loco;
+    case '-': return decode_forget;
+    case 'p': return decode_power;
+    case 'i': return decode_version;
+    case 'v': return decode_verify;
+    case 'r': return decode_read;
+    case 'w': return decode_write;
+    case 'X': return decode_failed;
+    default: return nullptr;
+  }
 }
 
 }  // namespace
 
 Event decode(StringView message) noexcept {
   const Tokenizer t(message);
-  Event e;  // Unhandled until a decoder succeeds
+  Event e;  // Unhandled, UnknownOpcode until a decoder succeeds
 
-  Outcome outcome = Outcome::Unrecognized;
-  switch (t.opcode()) {
-    case 'l': outcome = decode_loco(t, e); break;
-    case '-': outcome = decode_forget(t, e); break;
-    case 'p': outcome = decode_power(t, e); break;
-    case 'i': outcome = decode_version(t, e); break;
-    case 'v': outcome = decode_verify(t, e); break;
-    case 'r': outcome = decode_read(t, e); break;
-    case 'w': outcome = decode_write(t, e); break;
-    case 'X': outcome = decode_failed(t, e); break;
-    case '*': outcome = decode_diagnostic(t, e); break;
-    default: break;
+  Verdict verdict = reject(Reason::UnknownOpcode);
+  if (t.opcode() == '*') {
+    verdict = decode_diagnostic(t, e);
+  } else if (const Decoder decoder = field_decoder(t.opcode())) {
+    verdict = check_quotes(t);
+    if (verdict.ok) verdict = decoder(t, e);
   }
 
-  if (outcome != Outcome::Decoded) {
+  if (!verdict.ok) {
     e.type = EventType::Unhandled;
-    e.unhandled.malformed = outcome == Outcome::Malformed;
+    e.unhandled.reason = verdict.reason;
+    e.unhandled.field = verdict.field;
   }
   e.message = message;
   return e;
+}
+
+const char* name(EventType type) noexcept {
+  switch (type) {
+    case EventType::Unhandled: return "Unhandled";
+    case EventType::Loco: return "Loco";
+    case EventType::LocoForgotten: return "LocoForgotten";
+    case EventType::PowerAll: return "PowerAll";
+    case EventType::PowerTrack: return "PowerTrack";
+    case EventType::PowerRole: return "PowerRole";
+    case EventType::Version: return "Version";
+    case EventType::CvRead: return "CvRead";
+    case EventType::CvWritten: return "CvWritten";
+    case EventType::AddressRead: return "AddressRead";
+    case EventType::AddressWritten: return "AddressWritten";
+    case EventType::Failed: return "Failed";
+    case EventType::Diagnostic: return "Diagnostic";
+  }
+  return "?";
+}
+
+const char* name(Reason reason) noexcept {
+  switch (reason) {
+    case Reason::UnknownOpcode: return "UnknownOpcode";
+    case Reason::UnsupportedForm: return "UnsupportedForm";
+    case Reason::WrongFieldCount: return "WrongFieldCount";
+    case Reason::NotANumber: return "NotANumber";
+    case Reason::OutOfRange: return "OutOfRange";
+    case Reason::UnknownKeyword: return "UnknownKeyword";
+    case Reason::BadFormat: return "BadFormat";
+    case Reason::UnterminatedQuote: return "UnterminatedQuote";
+  }
+  return "?";
 }
 
 }  // namespace dccex

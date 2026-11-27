@@ -71,7 +71,8 @@ TEST_CASE("feeding nothing does nothing") {
   Sink sink;
   framer.feed(nullptr, 0, &Sink::on_message, &sink);
   CHECK(sink.messages.empty());
-  CHECK(framer.dropped() == 0);
+  CHECK(framer.overflowed() == 0);
+  CHECK(framer.abandoned() == 0);
 }
 
 // --- Messages split across feed() calls ---------------------------------------
@@ -101,7 +102,8 @@ TEST_CASE("an opening delimiter inside a message abandons the partial message") 
   Sink sink;
   feed(framer, sink, "<abc<def>");
   CHECK(sink.messages == Messages{"def"});
-  CHECK(framer.dropped() == 1);
+  CHECK(framer.abandoned() == 1);
+  CHECK(framer.overflowed() == 0);
 }
 
 TEST_CASE("an abandoned partial message is counted once per abandonment") {
@@ -109,7 +111,7 @@ TEST_CASE("an abandoned partial message is counted once per abandonment") {
   Sink sink;
   feed(framer, sink, "<a<b<c>");
   CHECK(sink.messages == Messages{"c"});
-  CHECK(framer.dropped() == 2);
+  CHECK(framer.abandoned() == 2);
 }
 
 // --- Capacity ----------------------------------------------------------------
@@ -119,7 +121,7 @@ TEST_CASE("a message exactly at capacity is delivered") {
   Sink sink;
   feed(framer, sink, "<abcd>");
   CHECK(sink.messages == Messages{"abcd"});
-  CHECK(framer.dropped() == 0);
+  CHECK(framer.overflowed() == 0);
 }
 
 TEST_CASE("a message over capacity is dropped whole and counted") {
@@ -127,7 +129,8 @@ TEST_CASE("a message over capacity is dropped whole and counted") {
   Sink sink;
   feed(framer, sink, "<abcde><ok>");
   CHECK(sink.messages == Messages{"ok"});
-  CHECK(framer.dropped() == 1);
+  CHECK(framer.overflowed() == 1);
+  CHECK(framer.abandoned() == 0);
 }
 
 TEST_CASE("the tail of an overflowed message is discarded across chunks") {
@@ -138,7 +141,7 @@ TEST_CASE("the tail of an overflowed message is discarded across chunks") {
   feed(framer, sink, "hij>");
   feed(framer, sink, "<ok>");
   CHECK(sink.messages == Messages{"ok"});
-  CHECK(framer.dropped() == 1);
+  CHECK(framer.overflowed() == 1);
 }
 
 TEST_CASE("an opening delimiter during overflow starts a new message") {
@@ -146,7 +149,17 @@ TEST_CASE("an opening delimiter during overflow starts a new message") {
   Sink sink;
   feed(framer, sink, "<abcdefg<ok>");
   CHECK(sink.messages == Messages{"ok"});
-  CHECK(framer.dropped() == 1);  // the overflow; no second count for the restart
+  CHECK(framer.overflowed() == 1);
+  CHECK(framer.abandoned() == 0);  // the overflowed message was already counted
+}
+
+TEST_CASE("overflow and abandonment are counted separately") {
+  dccex::Framer<4> framer;
+  Sink sink;
+  feed(framer, sink, "<toolong><a<b<cc><x>");
+  CHECK(sink.messages == Messages{"cc", "x"});
+  CHECK(framer.overflowed() == 1);
+  CHECK(framer.abandoned() == 2);
 }
 
 TEST_CASE("capacity is reported") {
@@ -160,7 +173,8 @@ TEST_CASE("a null callback consumes input without delivering it") {
   dccex::Framer<> framer;
   const std::string bytes = "<a><b>";
   framer.feed(bytes.data(), bytes.size(), nullptr, nullptr);
-  CHECK(framer.dropped() == 0);
+  CHECK(framer.overflowed() == 0);
+  CHECK(framer.abandoned() == 0);
 
   Sink sink;
   feed(framer, sink, "<c>");
@@ -180,15 +194,17 @@ TEST_CASE("the context pointer is passed to the callback unchanged") {
   CHECK(probe.seen == &probe);
 }
 
-TEST_CASE("reset discards a partial message and clears the dropped count") {
+TEST_CASE("reset discards a partial message and clears both counters") {
   dccex::Framer<4> framer;
   Sink sink;
   feed(framer, sink, "<toolong>");
-  feed(framer, sink, "<par");
-  REQUIRE(framer.dropped() == 1);
+  feed(framer, sink, "<a<par");
+  REQUIRE(framer.overflowed() == 1);
+  REQUIRE(framer.abandoned() == 1);
 
   framer.reset();
-  CHECK(framer.dropped() == 0);
+  CHECK(framer.overflowed() == 0);
+  CHECK(framer.abandoned() == 0);
   feed(framer, sink, "tial>");  // tail of the discarded message: outside any message now
   feed(framer, sink, "<ok>");
   CHECK(sink.messages == Messages{"ok"});
@@ -217,7 +233,8 @@ TEST_CASE("captured traffic frames correctly however it is chunked") {
         framer.feed(&c, 1, &Sink::on_message, &sink);
       }
       CHECK(sink.messages == capture.messages);
-      CHECK(framer.dropped() == 0);
+      CHECK(framer.overflowed() == 0);
+      CHECK(framer.abandoned() == 0);
     }
 
     SUBCASE("split into two chunks at every position") {
@@ -276,7 +293,8 @@ TEST_CASE("output never depends on how the stream is chunked") {
     }
 
     CHECK(actual.messages == expected.messages);
-    CHECK(chunked.dropped() == whole.dropped());
+    CHECK(chunked.overflowed() == whole.overflowed());
+    CHECK(chunked.abandoned() == whole.abandoned());
     for (const auto& m : actual.messages) {
       CHECK(m.size() <= 8);
       CHECK(m.find('<') == std::string::npos);
