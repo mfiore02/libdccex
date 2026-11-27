@@ -371,7 +371,21 @@ Argument ranges enforced by the encoder:
 
 = Errors
 
-All fallible operations return a small result type carrying either a value or one of:
+The library separates three kinds of problem and reports each one differently. Only the first is an error.
+
+#table(
+  columns: (auto, 1fr, 1fr),
+  stroke: 0.5pt + luma(200),
+  inset: 6pt,
+  [Kind], [Example], [How it is reported],
+  [Caller mistake], [Asking the encoder for speed 200, or giving it a buffer too small for the command.], [An error code, returned immediately. Nothing is written.],
+  [Bad incoming data], [Bytes damaged in transit, a reply longer than the framer buffer, a loco broadcast for address 0.], [Not an error. The library recovers and keeps going: the framer counts the drop, the decoder returns an `Unhandled` event with `malformed` set.],
+  [Station-reported failure], [`<X>` for a rejected command, or a CV read that returns `-1`.], [Not an error. These are valid replies, delivered as ordinary events (`Failed`, or a result whose `ok()` is false).],
+)
+
+== Caller mistakes
+
+Errors are reserved for requests the calling code should not have made. The fix is in the application, and the library reports the problem at the call that caused it. Fallible operations return a small result type carrying either a value or one of:
 
 #table(
   columns: (auto, 1fr),
@@ -382,9 +396,22 @@ All fallible operations return a small result type carrying either a value or on
   [`OutOfRange`], [An encoder argument is outside its protocol range.],
 )
 
-Framing and decoding problems are not errors either: the framer counts dropped messages, and the decoder reports malformed messages as `Unhandled` events.
+== Bad incoming data
 
-Protocol-level failures reported by the station (`<X>`, a `-1` CV value) are events, not library errors.
+Problems in data from the network or the command station are not errors, for three reasons:
+
++ The caller did nothing wrong and cannot fix anything. The bytes have already arrived.
++ One `feed()` call can carry many messages. A single error code could not say which one was bad, and stopping at the first problem would lose the good messages after it.
++ The DCC-EX throttle guide requires clients to ignore what they do not understand and carry on.
+
+So the library recovers and reports through its normal outputs:
+
+- The framer discards the damaged or oversized message, resynchronizes at the next `<`, and increments `dropped()`. A steadily rising count points to a bad link or a framer buffer that is too small.
+- The decoder returns an `Unhandled` event with `malformed` set, carrying the original message text. The application sees it in its usual handler and can log it, count it, or ignore it. Every message still yields exactly one event; there is no separate error path.
+
+== Station-reported failures
+
+When the command station rejects a command or a programming operation fails, it says so with a valid reply. The library decodes these like any other reply. The application checks for them in its handler, alongside the successful results they replace.
 
 = Testing
 
