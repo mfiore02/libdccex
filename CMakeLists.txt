@@ -9,7 +9,8 @@ project(libdccex
 # Library
 # ---------------------------------------------------------------------------
 set(DCCEX_SOURCES
-  src/decoder.cpp)
+  src/decoder.cpp
+  src/encoder.cpp)
 
 add_library(dccex STATIC ${DCCEX_SOURCES})
 add_library(dccex::dccex ALIAS dccex)
@@ -48,6 +49,7 @@ if(DCCEX_BUILD_TESTS)
   add_executable(dccex_tests
     tests/main.cpp
     tests/decoder_test.cpp
+    tests/encoder_test.cpp
     tests/framer_test.cpp
     tests/string_view_test.cpp
     tests/tokenizer_test.cpp)

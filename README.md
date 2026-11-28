@@ -18,8 +18,14 @@ Early development. Implemented so far:
 - **Tokenizer:** splits a message into an opcode and fields.
 - **Decoder:** turns a message into a typed event (loco state, power, CV and address
   results, version, diagnostics), one event per message.
+- **Encoder:** builds commands (power, throttle, functions, emergency stop, CV and address
+  programming on both tracks) into a caller-provided buffer.
 
-Not yet: the encoder, for building commands.
+```cpp
+char buf[dccex::kMaxCommandSize];
+const auto r = dccex::encode::throttle(buf, 4014, 5, true);   // "<t 4014 5 1>\n"
+if (r.ok()) send(buf, r.length);
+```
 The design is in [`docs/spec.typ`](docs/spec.typ); build the PDF with
 [Typst](https://typst.app): `typst compile docs/spec.typ`.
 

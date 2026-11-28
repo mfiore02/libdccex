@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "dccex/decoder.hpp"
+#include "dccex/encoder.hpp"
 #include "dccex/framer.hpp"
 #include "dccex/string_view.hpp"
 #include "dccex/tokenizer.hpp"
@@ -46,6 +47,27 @@ void on_message(void* ctx, dccex::StringView message) {
 }
 
 }  // namespace
+
+std::size_t dccex_freestanding_encode(char* out, std::size_t capacity, std::uint16_t cab) {
+  dccex::Buffer buf(out, capacity);
+  std::size_t total = 0;
+  total += dccex::encode::power(buf, dccex::PowerTarget::Main, true).length;
+  total += dccex::encode::join_prog_to_main(buf).length;
+  total += dccex::encode::status(buf).length;
+  total += dccex::encode::throttle(buf, cab, 5, true).length;
+  total += dccex::encode::emergency_stop(buf, cab, true).length;
+  total += dccex::encode::emergency_stop_all(buf).length;
+  total += dccex::encode::query_loco(buf, cab).length;
+  total += dccex::encode::function(buf, cab, 2, true).length;
+  total += dccex::encode::forget_loco(buf, cab).length;
+  total += dccex::encode::forget_all_locos(buf).length;
+  total += dccex::encode::read_cv(buf, 29).length;
+  total += dccex::encode::read_address(buf).length;
+  total += dccex::encode::write_cv(buf, 3, 10).length;
+  total += dccex::encode::write_address(buf, cab).length;
+  const dccex::Encoded last = dccex::encode::write_cv_main(buf, cab, 3, 10);
+  return total + last.length + dccex::StringView(dccex::name(last.error)).size();
+}
 
 std::int64_t dccex_freestanding_check(const char* data, std::size_t len) {
   static dccex::Framer<> framer;

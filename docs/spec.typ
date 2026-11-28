@@ -371,21 +371,54 @@ Both return fixed strings and never null; a value outside the enumeration gives 
 
 == Encoder
 
+One function per command, in namespace `dccex::encode`. Each writes a complete command, `<...>` followed by a newline, at the start of a caller-provided buffer and returns its length. No terminating null is written.
+
 ```cpp
-// Each returns the number of bytes written, or an error if the arguments are
-// out of range or the buffer is too small. Nothing is written on error.
-Result<std::size_t> throttle(Span<char> out, std::uint16_t cab,
-                             std::int8_t speed, bool forward);
-Result<std::size_t> function(Span<char> out, std::uint16_t cab,
-                             std::uint8_t fn, bool on);
-Result<std::size_t> power(Span<char> out, PowerTarget target, bool on);
-Result<std::size_t> read_cv(Span<char> out, std::uint16_t cv);
-Result<std::size_t> write_cv(Span<char> out, std::uint16_t cv, std::uint8_t value);
-Result<std::size_t> write_cv_main(Span<char> out, std::uint16_t cab,
-                                  std::uint16_t cv, std::uint8_t value);
-Result<std::size_t> emergency_stop_all(Span<char> out);
-// ... one function per supported command
+struct Buffer { char* data; std::size_t capacity; };   // converts from char[N]
+constexpr std::size_t kMaxCommandSize = 32;             // fits any command
+
+enum class EncodeError : std::uint8_t { None, BufferTooSmall, OutOfRange };
+struct Encoded {
+  std::size_t length;      // bytes written, 0 on error
+  EncodeError error;
+  bool ok() const;
+};
+
+namespace encode {
+Encoded power(Buffer out, PowerTarget target, bool on);   // All, Main, Prog
+Encoded join_prog_to_main(Buffer out);
+Encoded status(Buffer out);
+Encoded throttle(Buffer out, std::uint16_t cab, std::uint8_t speed, bool forward);
+Encoded emergency_stop(Buffer out, std::uint16_t cab, bool forward);
+Encoded emergency_stop_all(Buffer out);
+Encoded query_loco(Buffer out, std::uint16_t cab);
+Encoded function(Buffer out, std::uint16_t cab, std::uint16_t fn, bool on);
+Encoded forget_loco(Buffer out, std::uint16_t cab);
+Encoded forget_all_locos(Buffer out);
+Encoded read_cv(Buffer out, std::uint16_t cv);
+Encoded read_address(Buffer out);
+Encoded write_cv(Buffer out, std::uint16_t cv, std::uint8_t value);
+Encoded write_address(Buffer out, std::uint16_t address);
+Encoded write_cv_main(Buffer out, std::uint16_t cab, std::uint16_t cv, std::uint8_t value);
+}
 ```
+
+Typical use:
+
+```cpp
+char buf[kMaxCommandSize];
+const Encoded r = encode::throttle(buf, 4014, 5, true);   // "<t 4014 5 1>\n"
+if (r.ok()) send(buf, r.length);
+```
+
+Rules:
+
+- Arguments are checked before anything is written. A range error takes priority over a buffer that is too small.
+- On any error, the buffer is left untouched and `length` is 0. The command is built in scratch space and copied out only if it fits.
+- Speed follows the decoder's convention: 0 to 126, with emergency stop as its own function rather than speed -1. `emergency_stop` sends `<t cab -1 dir>`.
+- `join_prog_to_main` is separate from `power` so that joining the tracks, which sends programming commands to every loco on the main, is never done by accident. Turning any power off ends the join.
+- `forget_all_locos` sends `<- 0>`.
+- `name(EncodeError)` gives a fixed string for logging, like the decoder's `name()` functions.
 
 Argument ranges enforced by the encoder:
 
@@ -394,8 +427,8 @@ Argument ranges enforced by the encoder:
   stroke: 0.5pt + luma(200),
   inset: 5pt,
   [Argument], [Range], [Source],
-  [cab], [1 to 10239], [DCC long address range; the station rejects larger values],
-  [speed], [-1 to 126], [Station rejects others],
+  [cab, address], [1 to 10239], [DCC address range; the station rejects anything else],
+  [speed], [0 to 126], [Emergency stop has its own function],
   [function], [0 to 32767], [Station accepts any non-negative number; F29 and up use binary state control],
   [cv], [1 to 1024], [DCC CV range],
   [value], [0 to 255], [One byte],
